@@ -8,12 +8,14 @@ from soundDs import SoundDS
 
 
 class Training:
+    threshold = 0.7
+
     @staticmethod
     def load_data_set():
-        ds = SoundDS('sound\\ready')
+        ds = SoundDS('sound\\ready_esp32_44100_32-16')
         # Random split of 80:20 between training and validation
         num_items = len(ds)
-        num_train = round(num_items * 0.99)
+        num_train = round(num_items * 0.9)
         num_val = num_items - num_train
         train_ds, val_ds = random_split(ds, [num_train, num_val])
         # Create training and validation data loaders
@@ -32,6 +34,10 @@ class Training:
         return model
 
     @staticmethod
+    def binary_prediction(output, threshold):
+        return output > threshold
+
+    @staticmethod
     def training(train_dl, num_epochs):
         # Create the model and put it on the GPU if available
         model = Model()
@@ -41,7 +47,7 @@ class Training:
         next(model.parameters()).device
 
         # Loss Function, Optimizer and Scheduler
-        criterion = nn.CrossEntropyLoss()
+        criterion = nn.BCELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
         scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.001,
                                                         steps_per_epoch=int(len(train_dl)),
@@ -58,6 +64,7 @@ class Training:
             for i, data in enumerate(train_dl):
                 # Get the input features and target labels, and put them on the GPU
                 inputs, labels = data[0].to(device), data[1].to(device)
+                # labels = labels.unsqueeze(0)
 
                 # Normalize the inputs
                 inputs_m, inputs_s = inputs.mean(), inputs.std()
@@ -70,7 +77,8 @@ class Training:
 
                 # forward + backward + optimize
                 outputs = model(inputs)
-                loss = criterion(outputs, labels)
+                outputs = outputs.squeeze(dim=0)
+                loss = criterion(outputs, labels.float())
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
@@ -80,7 +88,7 @@ class Training:
 
                 # Get the predicted class with the highest score
                 # _, prediction = torch.max(outputs, 1)
-                prediction = training.Training.binary_prediction(outputs)
+                prediction = Training.binary_prediction(outputs, Training.threshold)
                 # Count of predictions that matched the target label
                 correct_prediction += (prediction == labels).sum().item()
                 total_prediction += prediction.shape[0]
@@ -99,21 +107,15 @@ class Training:
         return model, device
 
     @staticmethod
-    def binary_prediction(output):
-        fire_predictions = output[:,1]
-        predictions = torch.zeros(fire_predictions.shape[0], dtype=int)
-        predictions[fire_predictions > 0] = 1
-
-        return predictions
-
-    @staticmethod
     def inference(model, val_dl, device):
-        correct_prediction = 0
-        total_prediction = 0
+        predictions = []
+        correct_predictions = []
+        fire_predictions = []
+        bg_predictions = []
         correct_prediction_sig = 0
         total_prediction_sig = 0
-        correct_prediction_sig2 = 0
-        total_prediction_sig2 = 0
+        correct_prediction = 0
+        total_prediction = 0
         correct_prediction_bg = 0
         total_prediction_bg = 0
 
@@ -128,35 +130,32 @@ class Training:
                 inputs = (inputs - inputs_m) / inputs_s
 
                 # Get predictions
-                outputs = model(inputs)
+                outputs = model(inputs).squeeze(dim=0)
 
                 # Get the predicted class with the highest score
-                _, prediction = torch.max(outputs, 1)
-                prediction2 = training.Training.binary_prediction(outputs)
+                prediction = Training.binary_prediction(outputs, Training.threshold)
 
-                correct_prediction_sig += ((prediction == labels) & (labels == torch.ones(labels.shape[0]))).sum().item()
+                correct_predictions.extend(labels.cpu().numpy())
+                predictions.extend(outputs.cpu().numpy())
+
+                correct_prediction += (prediction == labels).sum().item()
+                total_prediction += prediction.size()[0]
+
+                correct_prediction_sig += (
+                            (prediction == labels) & (labels == torch.ones(labels.shape[0]))).sum().item()
                 total_prediction_sig += (labels == torch.ones(labels.shape[0])).sum().item()
 
-                correct_prediction_sig2 += ((prediction2 == labels) & (labels == torch.ones(labels.shape[0]))).sum().item()
-                total_prediction_sig2 += (labels == torch.ones(labels.shape[0])).sum().item()
-
-                correct_prediction_bg += ((prediction == labels) & (labels == torch.zeros(labels.shape[0]))).sum().item()
+                correct_prediction_bg += (
+                            (prediction == labels) & (labels == torch.zeros(labels.shape[0]))).sum().item()
                 total_prediction_bg += (labels == torch.zeros(labels.shape[0])).sum().item()
-
-                # Count of predictions that matched the target label
-                correct_prediction += (prediction == labels).sum().item()
-                total_prediction += prediction.shape[0]
-
-        acc_sig = correct_prediction_sig / total_prediction_sig
-        print(f'Signal Accuracy: {acc_sig:.2f}, Total items: {total_prediction_sig}')
-
-        acc_sig2 = correct_prediction_sig2 / total_prediction_sig2
-        print(f'Binary Signal Accuracy: {acc_sig2:.2f}, Total items: {total_prediction_sig2}')
-
-        acc_bg = correct_prediction_bg / total_prediction_bg
-        print(f'Background Accuracy: {acc_bg:.2f}, Total items: {total_prediction_bg}')
 
         acc = correct_prediction / total_prediction
         print(f'Accuracy: {acc:.2f}, Total items: {total_prediction}')
 
-        return acc
+        acc_sig = correct_prediction_sig / total_prediction_sig
+        print(f'Accuracy Signal: {acc_sig:.2f}, Total items: {total_prediction_sig}')
+
+        acc_bg = correct_prediction_bg / total_prediction_bg
+        print(f'Accuracy Bg: {acc_bg:.2f}, Total items: {total_prediction_bg}')
+
+        return predictions, correct_predictions
